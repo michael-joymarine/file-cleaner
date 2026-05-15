@@ -1,0 +1,39 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install pyinstaller schedule
+    
+    - name: Build EXE
+      run: |
+        pyinstaller `
+            --name="定时文件清理工具" `
+            --onefile `
+            --windowed `
+            --clean `
+            file_cleaner_windows.py
+    
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: FileCleaner-EXE
+        path: dist/定时文件清理工具.exe
+        retention-days: 30
