@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Windows 定时文件清理工具 - 源码版本
-与 macOS 版功能完全一致
+与 macOS 版功能完全一致，新增开机自启动选项
 """
 
 import tkinter as tk
@@ -9,22 +9,92 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 import time
 import os
+import sys
 import schedule
 from datetime import datetime
 from pathlib import Path
 import json
 
+try:
+    import winreg
+    HAS_WINREG = True
+except ImportError:
+    HAS_WINREG = False
+
 # 配置文件路径
 CONFIG_FILE = Path.home() / "AppData" / "Local" / "FileCleaner" / "config.json"
+
+# 注册表开机自启动项
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "JoyMarineFileCleaner"
+
+
+def is_autostart_enabled():
+    """检查开机自启动是否已启用"""
+    if not HAS_WINREG:
+        return False
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_READ)
+        value, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
+        winreg.CloseKey(key)
+        # 验证路径是否与当前程序一致
+        exe_path = get_exe_path()
+        return value.lower() == exe_path.lower()
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def enable_autostart():
+    """启用开机自启动"""
+    if not HAS_WINREG:
+        return False
+    try:
+        exe_path = get_exe_path()
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, exe_path)
+        winreg.CloseKey(key)
+        return True
+    except Exception as e:
+        print(f"启用开机自启动失败: {e}")
+        return False
+
+
+def disable_autostart():
+    """禁用开机自启动"""
+    if not HAS_WINREG:
+        return True
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.DeleteValue(key, AUTOSTART_NAME)
+        winreg.CloseKey(key)
+        return True
+    except FileNotFoundError:
+        # 注册表项不存在，视为已禁用
+        return True
+    except Exception as e:
+        print(f"禁用开机自启动失败: {e}")
+        return False
+
+
+def get_exe_path():
+    """获取当前程序可执行文件路径"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后的 exe
+        return sys.executable
+    else:
+        # 开发环境，使用 python 解释器 + 脚本路径
+        return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
 
 
 class FileCleanerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("定时文件清理工具 - Joy Marine")
-        self.root.geometry("700x500")
+        self.root.geometry("720x560")
         self.root.resizable(True, True)
-        
+
         # 设置窗口图标（使用默认）
         try:
             self.root.iconbitmap(default="")
@@ -41,6 +111,7 @@ class FileCleanerApp:
         self.watch_folders = []
         self.days_threshold = 7
         self.schedule_time = "03:00"
+        self.autostart_enabled = is_autostart_enabled()
 
         # 加载配置
         self.load_config()
@@ -60,6 +131,7 @@ class FileCleanerApp:
                     self.watch_folders = config.get('watch_folders', [])
                     self.days_threshold = config.get('days_threshold', 7)
                     self.schedule_time = config.get('schedule_time', "03:00")
+                    self.autostart_enabled = config.get('autostart_enabled', is_autostart_enabled())
             except Exception as e:
                 print(f"加载配置失败: {e}")
 
@@ -71,7 +143,8 @@ class FileCleanerApp:
                 json.dump({
                     'watch_folders': self.watch_folders,
                     'days_threshold': self.days_threshold,
-                    'schedule_time': self.schedule_time
+                    'schedule_time': self.schedule_time,
+                    'autostart_enabled': self.autostart_enabled
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存配置失败: {e}")
@@ -134,13 +207,34 @@ class FileCleanerApp:
 
         # 定时设置
         time_frame = ttk.Frame(settings_frame)
-        time_frame.pack(fill=tk.X)
+        time_frame.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Label(time_frame, text="每天执行时间: ").pack(side=tk.LEFT)
         self.time_var = tk.StringVar(value=self.schedule_time)
         time_entry = ttk.Entry(time_frame, width=10, textvariable=self.time_var)
         time_entry.pack(side=tk.LEFT, padx=5)
         ttk.Label(time_frame, text="(格式: HH:MM)").pack(side=tk.LEFT)
+
+        # 开机自启动选项
+        autostart_frame = ttk.Frame(settings_frame)
+        autostart_frame.pack(fill=tk.X)
+
+        self.autostart_var = tk.BooleanVar(value=self.autostart_enabled)
+        self.autostart_check = ttk.Checkbutton(
+            autostart_frame,
+            text="开机自动启动",
+            variable=self.autostart_var,
+            command=self.toggle_autostart
+        )
+        self.autostart_check.pack(side=tk.LEFT)
+
+        self.autostart_status = ttk.Label(
+            autostart_frame,
+            text="（已启用 ✓）" if self.autostart_enabled else "（未启用）",
+            foreground="green" if self.autostart_enabled else "gray",
+            font=("Microsoft YaHei UI", 9)
+        )
+        self.autostart_status.pack(side=tk.LEFT, padx=(10, 0))
 
         # 状态区域
         status_frame = ttk.LabelFrame(main_frame, text="运行状态", padding="10")
@@ -156,11 +250,14 @@ class FileCleanerApp:
         self.next_run_label.pack()
 
         # 日志区域
-        self.log_text = tk.Text(status_frame, height=8, font=("Microsoft YaHei UI", 9),
-                                state=tk.DISABLED, wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        log_container = ttk.Frame(status_frame)
+        log_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        log_scroll = ttk.Scrollbar(status_frame, orient=tk.VERTICAL,
+        self.log_text = tk.Text(log_container, height=8, font=("Microsoft YaHei UI", 9),
+                                state=tk.DISABLED, wrap=tk.WORD)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        log_scroll = ttk.Scrollbar(log_container, orient=tk.VERTICAL,
                                    command=self.log_text.yview)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=log_scroll.set)
@@ -177,6 +274,33 @@ class FileCleanerApp:
         ttk.Button(bottom_frame, text="保存设置", command=self.save_settings).pack(side=tk.LEFT)
 
         self.log(f"程序启动 - 监控 {len(self.watch_folders)} 个文件夹")
+        if self.autostart_enabled:
+            self.log("开机自启动: 已启用")
+
+    def toggle_autostart(self):
+        """切换开机自启动"""
+        enabled = self.autostart_var.get()
+        if enabled:
+            if enable_autostart():
+                self.autostart_enabled = True
+                self.autostart_status.config(text="（已启用 ✓）", foreground="green")
+                self.log("开机自启动已启用")
+            else:
+                self.autostart_var.set(False)
+                self.autostart_enabled = False
+                messagebox.showerror("错误", "启用开机自启动失败，请以管理员权限运行")
+                return
+        else:
+            if disable_autostart():
+                self.autostart_enabled = False
+                self.autostart_status.config(text="（未启用）", foreground="gray")
+                self.log("开机自启动已禁用")
+            else:
+                self.autostart_var.set(True)
+                self.autostart_enabled = True
+                messagebox.showerror("错误", "禁用开机自启动失败")
+                return
+        self.save_config()
 
     def add_folder(self):
         """添加监控文件夹"""
