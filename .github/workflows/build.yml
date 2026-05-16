@@ -20,7 +20,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install pyinstaller schedule
+        pip install pyinstaller schedule pystray Pillow
     
     - name: Build EXE
       run: |
