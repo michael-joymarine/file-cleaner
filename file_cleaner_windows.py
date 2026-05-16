@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Windows 定时文件清理工具 - 源码版本
-与 macOS 版功能完全一致，新增开机自启动选项
+与 macOS 版功能完全一致，新增开机自启动选项 + 最小化到系统托盘
 """
 
 import tkinter as tk
@@ -20,6 +20,18 @@ try:
     HAS_WINREG = True
 except ImportError:
     HAS_WINREG = False
+
+try:
+    from PIL import Image, ImageDraw
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+try:
+    import pystray
+    HAS_PYSTRAY = True
+except ImportError:
+    HAS_PYSTRAY = False
 
 # 配置文件路径
 CONFIG_FILE = Path.home() / "AppData" / "Local" / "FileCleaner" / "config.json"
@@ -78,6 +90,33 @@ def disable_autostart():
         return False
 
 
+def create_tray_icon_image():
+    """创建系统托盘图标（蓝底白色清理图标）"""
+    if not HAS_PIL:
+        return None
+    width = 64
+    height = 64
+    image = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    dc = ImageDraw.Draw(image)
+
+    # 蓝色圆形背景
+    dc.ellipse([4, 4, 60, 60], fill=(30, 120, 220, 255))
+
+    # 白色垃圾桶图标
+    # 桶身
+    dc.rectangle([20, 22, 44, 48], fill=(255, 255, 255, 255))
+    # 桶盖
+    dc.rectangle([17, 18, 47, 23], fill=(255, 255, 255, 255))
+    # 桶把手
+    dc.rectangle([26, 12, 38, 19], fill=(255, 255, 255, 255))
+    # 桶身竖线（表示垃圾纹理）
+    dc.line([(27, 26), (27, 45)], fill=(30, 120, 220, 255), width=2)
+    dc.line([(32, 26), (32, 45)], fill=(30, 120, 220, 255), width=2)
+    dc.line([(37, 26), (37, 45)], fill=(30, 120, 220, 255), width=2)
+
+    return image
+
+
 def get_exe_path():
     """获取当前程序可执行文件路径"""
     if getattr(sys, 'frozen', False):
@@ -113,6 +152,10 @@ class FileCleanerApp:
         self.schedule_time = "03:00"
         self.autostart_enabled = is_autostart_enabled()
 
+        # 系统托盘相关
+        self.tray_icon = None
+        self.is_hidden = False  # 窗口是否隐藏到托盘
+
         # 加载配置
         self.load_config()
 
@@ -121,6 +164,95 @@ class FileCleanerApp:
 
         # 启动调度线程
         self.start_scheduler()
+
+        # 初始化系统托盘（如果支持）
+        self._init_tray()
+
+        # 绑定最小化事件
+        self.root.bind("<Unmap>", self._on_unmap)
+
+    def _init_tray(self):
+        """初始化系统托盘图标"""
+        if not HAS_PYSTRAY or not HAS_PIL:
+            return
+
+        icon_image = create_tray_icon_image()
+        if icon_image is None:
+            return
+
+        menu = pystray.Menu(
+            pystray.MenuItem("显示主窗口", self._show_window, default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("立即执行清理", self._tray_clean_now),
+            pystray.MenuItem("退出程序", self._tray_exit),
+        )
+
+        self.tray_icon = pystray.Icon(
+            "FileCleaner",
+            icon_image,
+            "定时文件清理工具",
+            menu
+        )
+
+        # 在独立线程中运行托盘图标
+        tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+        tray_thread.start()
+
+        # 初始时隐藏托盘图标（仅在最小化后显示）
+        self.tray_icon.visible = False
+
+    def _on_unmap(self, event):
+        """窗口最小化事件处理"""
+        # 确保是主窗口的最小化事件（排除子组件的 Unmap）
+        if event.widget != self.root:
+            return
+        # 检查窗口是否真的被最小化了（iconic 状态）
+        try:
+            state = self.root.state()
+            if state == 'iconic':
+                self._hide_to_tray()
+        except tk.TclError:
+            pass
+
+    def _hide_to_tray(self):
+        """隐藏窗口到系统托盘"""
+        self.root.withdraw()
+        self.is_hidden = True
+        if self.tray_icon:
+            self.tray_icon.visible = True
+            self.tray_icon.title = "定时文件清理工具（运行中）" if self.is_running else "定时文件清理工具（已停止）"
+
+    def _show_window(self, icon=None, item=None):
+        """从系统托盘恢复窗口"""
+        # 使用 root.after 确保在主线程中执行
+        self.root.after(0, self._do_show_window)
+
+    def _do_show_window(self):
+        """在主线程中恢复窗口"""
+        self.root.deiconify()
+        self.root.state('normal')
+        self.root.lift()
+        self.root.focus_force()
+        self.is_hidden = False
+        if self.tray_icon:
+            self.tray_icon.visible = False
+
+    def _tray_clean_now(self, icon=None, item=None):
+        """托盘菜单：立即执行清理"""
+        self.root.after(0, self.run_clean_now)
+
+    def _tray_exit(self, icon=None, item=None):
+        """托盘菜单：退出程序"""
+        self.root.after(0, self._do_exit)
+
+    def _do_exit(self):
+        """真正退出程序"""
+        if self.tray_icon:
+            self.tray_icon.visible = False
+            self.tray_icon.stop()
+        if self.is_running:
+            self.stop_scheduler()
+        self.root.destroy()
 
     def load_config(self):
         """加载配置文件"""
@@ -475,10 +607,14 @@ class FileCleanerApp:
                 pass
 
     def on_closing(self):
-        """窗口关闭时"""
-        if self.is_running:
-            self.stop_scheduler()
-        self.root.destroy()
+        """窗口关闭时 - 最小化到托盘而非退出"""
+        if self.tray_icon and HAS_PYSTRAY:
+            self._hide_to_tray()
+        else:
+            # 不支持托盘时，直接退出
+            if self.is_running:
+                self.stop_scheduler()
+            self.root.destroy()
 
 
 def main():
@@ -486,6 +622,12 @@ def main():
     app = FileCleanerApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
+    # 确保托盘图标被清理
+    if app.tray_icon:
+        try:
+            app.tray_icon.stop()
+        except:
+            pass
 
 
 if __name__ == "__main__":
